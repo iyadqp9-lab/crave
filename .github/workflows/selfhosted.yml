@@ -11,7 +11,7 @@ on:
     # Various inputs to simplify usage of workflow.
     inputs:
       BASE_PROJECT:
-        description: 'Choose a base project:'
+        description: 'Initial SM-T355Y Wi-Fi-only baseline (Android 11, not Android 13):'
         required: true
         default: 'LineageOS 21.0'
         type: choice
