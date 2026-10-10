@@ -47,12 +47,21 @@ jobs:
       # Configure 'runner'
     - name: Run crave devspace
       run: |
-        crave ${{ secrets.CRAVE_FLAGS }} devspace -- "rm -rf actions-runner || true
+        # Match the Crave project URL, not the helper repository checked out by Actions.
+        git clone --depth=1 -b lineage-18.1 https://github.com/accupara/los18.1.git "$RUNNER_TEMP/crave-project"
+        cd "$RUNNER_TEMP/crave-project"
+
+        REMOTE_COMMAND=$(cat <<'REMOTE'
+        rm -rf actions-runner || true
         curl https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/scripts/runner-setup.sh | bash
         if [[ "${{ inputs.RUNNER_TOKEN }}" == "github_pat_*" ]]; then
           echo "PAT does not work!"
+          exit 1
         else
-            echo "Runner token found"
+          echo "Runner token found"
         fi
         cd actions-runner
-         ./config.sh --unattended --url "https://github.com/${{ github.repository }}" --token "${{ inputs.RUNNER_TOKEN }}""
+        ./config.sh --unattended --url "https://github.com/${{ github.repository }}" --token "${{ inputs.RUNNER_TOKEN }}"
+        REMOTE
+        )
+        crave ${{ secrets.CRAVE_FLAGS }} devspace -- "$REMOTE_COMMAND"
