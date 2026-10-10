@@ -97,12 +97,15 @@ jobs:
           curl -s https://raw.githubusercontent.com/accupara/crave/master/get_crave.sh | bash -s --
           mv ${PWD}/crave ${HOME}/bin/
           sudo ln -sf /home/${USER}/bin/crave /usr/bin/crave
-          envsubst < "${PWD}/crave.conf.sample" > "${HOME}/crave.conf"
+          if [[ -z "${CRAVE_CONF}" ]]; then
+            echo "::error::Missing CRAVE_CONF secret. Add the complete crave.conf downloaded from the foss.crave.io dashboard."
+            exit 1
+          fi
+          printf '%s\n' "${CRAVE_CONF}" > "${HOME}/crave.conf"
           rm -rf ${PWD}/crave.conf.sample          
         fi
       env:
-        CRAVE_USERNAME: ${{  secrets.CRAVE_USERNAME  }}
-        CRAVE_TOKEN: ${{  secrets.CRAVE_TOKEN  }}
+        CRAVE_CONF: ${{ secrets.CRAVE_CONF }}
 
     - name: Run crave devspace
       run: |
