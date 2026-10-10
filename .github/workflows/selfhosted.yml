@@ -106,23 +106,46 @@ jobs:
 
     - name: Run crave devspace
       run: |
-        crave ${{ secrets.CRAVE_FLAGS }} devspace -- "echo "Looking for runner..."
-          # Look for whether there's a runner folder set up
-          if [ -f actions-runner/run.sh ] ; then
-            echo "Runner found! Restarting it..."
-          else
-            echo "Error! Runner not found!"
-            exit 1
-          fi
+        # Crave chooses a devspace by matching the current Git remote URL.
+        # The Actions checkout remote is this helper repo, not the Android project.
+        case "${{ github.event.inputs.BASE_PROJECT }}" in
+          "LineageOS 18.1") CRAVE_PROJECT_URL="https://github.com/accupara/los18.1.git"; CRAVE_PROJECT_BRANCH="lineage-18.1" ;;
+          "LineageOS 16.0") CRAVE_PROJECT_URL="https://github.com/accupara/los16.git"; CRAVE_PROJECT_BRANCH="lineage-16.0" ;;
+          "CyanogenMOD 14.1") CRAVE_PROJECT_URL="https://github.com/accupara/los-cm14.1.git"; CRAVE_PROJECT_BRANCH="cm-14.1" ;;
+          "LineageOS 20.0") CRAVE_PROJECT_URL="https://github.com/accupara/los20.git"; CRAVE_PROJECT_BRANCH="lineage-20.0" ;;
+          "LineageOS 21.0") CRAVE_PROJECT_URL="https://github.com/LineageOS/android.git"; CRAVE_PROJECT_BRANCH="lineage-21.0" ;;
+          "LineageOS 22.1") CRAVE_PROJECT_URL="https://github.com/accupara/los22.git"; CRAVE_PROJECT_BRANCH="lineage-22.1" ;;
+          "ArrowOS 13.1") CRAVE_PROJECT_URL="https://github.com/ArrowOS/android_manifest.git"; CRAVE_PROJECT_BRANCH="arrow-13.1" ;;
+          "DerpFest 14.0") CRAVE_PROJECT_URL="https://github.com/DerpFest-AOSP/manifest.git"; CRAVE_PROJECT_BRANCH="14" ;;
+          "CipherOS 14") CRAVE_PROJECT_URL="https://github.com/CipherOS/android_manifest.git"; CRAVE_PROJECT_BRANCH="fourteen" ;;
+          "PixelOS 15") CRAVE_PROJECT_URL="https://github.com/PixelOS-AOSP/manifest.git"; CRAVE_PROJECT_BRANCH="fifteen" ;;
+          "RisingOS 15 Revived") CRAVE_PROJECT_URL="https://github.com/RisingOS-Revived/android.git"; CRAVE_PROJECT_BRANCH="fifteen" ;;
+          "AOSP") CRAVE_PROJECT_URL="https://android.googlesource.com/platform/manifest.git"; CRAVE_PROJECT_BRANCH="master" ;;
+          *) echo "Unsupported Crave project: ${{ github.event.inputs.BASE_PROJECT }}"; exit 1 ;;
+        esac
+        git clone --depth=1 -b "$CRAVE_PROJECT_BRANCH" "$CRAVE_PROJECT_URL" "$RUNNER_TEMP/crave-project"
+        cd "$RUNNER_TEMP/crave-project"
 
-        if tmux has-session -t ghactions; then 
-          echo "Runner is already Running" 
-        else 
-          tmux kill-session -t ghactions;
-          tmux new-session -d -s ghactions 
-          tmux send-keys -t ghactions './actions-runner/run.sh' Enter 
-          echo "Runner Started"
-        fi "
+        REMOTE_COMMAND=$(cat <<'REMOTE'
+        echo "Looking for runner..."
+        if [ -f actions-runner/run.sh ]; then
+          echo "Runner found! Restarting it..."
+        else
+          echo "Error! Runner not found!"
+          exit 1
+        fi
+
+        if tmux has-session -t ghactions 2>/dev/null; then
+          echo "Runner is already running"
+        else
+          tmux kill-session -t ghactions 2>/dev/null || true
+          tmux new-session -d -s ghactions
+          tmux send-keys -t ghactions './actions-runner/run.sh' Enter
+          echo "Runner started"
+        fi
+        REMOTE
+        )
+        crave ${{ secrets.CRAVE_FLAGS }} devspace -- "$REMOTE_COMMAND"
   prepare:
     name: Prepare for Building
     runs-on: ubuntu-latest
