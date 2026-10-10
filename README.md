@@ -96,6 +96,10 @@ person@example.com
 This is the Authorization part of the crave.conf. It should not contain `:`, spaces, or `,`
 
 ![CRAVE_TOKEN](assets/cravetoken.png)
+
+### CRAVE_CONF (Required for self-hosted runner setup/restart)
+
+Open the complete `crave.conf` downloaded from the API Keys page on `foss.crave.io`. In **Settings → Secrets and variables → Actions**, add a repository secret named `CRAVE_CONF` and paste the entire file contents (the full JSON, not only the token). Keep it private and never commit it to the repository. The self-hosted runner setup and restart workflows use this full configuration to find the matching Crave project.
 ### CUSTOM_YAML (Optional)
 If this exists, the crave.yaml will be overridden while running the workflow
 
