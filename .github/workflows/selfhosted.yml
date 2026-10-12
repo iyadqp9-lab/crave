@@ -554,6 +554,19 @@ jobs:
           /opt/crave/resync.sh
         fi && \
 
+        # Fix legacy GPS blob source paths in the SM-T355Y device tree.
+        # The shared vendor tree stores these libraries under proprietary/vendor/lib.
+        if [ -f device/samsung/gt58lte/device.mk ]; then
+          sed -i \
+            -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_api_v02.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_api_v02.so#g' \
+            -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_ds_api.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_ds_api.so#g' \
+            device/samsung/gt58lte/device.mk
+          grep -n 'libloc_.*api' device/samsung/gt58lte/device.mk
+        else
+          echo "::error::Expected device/samsung/gt58lte/device.mk was not found after repo sync."
+          exit 1
+        fi && \
+
         # Set up build environment
         export BUILD_USERNAME=${{ github.actor }} ; \
         export BUILD_HOSTNAME=crave ; \
