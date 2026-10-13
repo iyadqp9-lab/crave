@@ -27,8 +27,9 @@ jobs:
         run: |
           ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/selfhosted.yml"); YAML.parse_file(".github/workflows/validate-crave-setup.yml"); puts "Workflow YAML parses successfully."'
 
-      - name: Check fixed Android 11 build settings
+      - name: Check Crave build inputs and compatibility libraries
         run: |
-          grep -q "PRODUCT_NAME := lineage_gt58lte" .github/scripts/crave-remote-build.sh
-          grep -q "libncurses5_6.2-0ubuntu2.1_amd64.deb" .github/scripts/crave-remote-build.sh
-          grep -q "REMOTE_SCRIPT_B64" .github/workflows/selfhosted.yml
+          grep -q 'INPUT_PRODUCT_NAME:' .github/workflows/selfhosted.yml
+          grep -q 'PRODUCT_NAME="$(decode_b64' .github/scripts/crave-remote-build.sh
+          grep -q 'libncurses5_6.2-0ubuntu2.1_amd64.deb' .github/scripts/crave-remote-build.sh
+          grep -q 'REMOTE_SCRIPT_B64' .github/workflows/selfhosted.yml
