@@ -567,6 +567,20 @@ jobs:
           exit 1
         fi && \
 
+        # Android 11's bundled Clang 3.8 needs the legacy libncurses.so.5 ABI.
+        # Install it INSIDE the Crave build environment, not only on the GitHub runner.
+        if ! ldconfig -p 2>/dev/null | grep -q 'libncurses.so.5'; then
+          echo "libncurses.so.5 is missing; installing the compatibility package in the Crave environment."
+          if [ "$(id -u)" -eq 0 ]; then
+            apt-get update && apt-get install -y libncurses5
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo -n apt-get update && sudo -n apt-get install -y libncurses5
+          else
+            echo "::error::Cannot install libncurses5: Crave environment has no root/sudo access."
+            exit 1
+          fi
+        fi && \\
+        ldconfig -p 2>/dev/null | grep -q 'libncurses.so.5' && \\
         # Set up build environment
         export BUILD_USERNAME=${{ github.actor }} ; \
         export BUILD_HOSTNAME=crave ; \
