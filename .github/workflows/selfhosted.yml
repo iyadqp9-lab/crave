@@ -332,12 +332,6 @@ jobs:
       # Test Your Personal 'Local Manifests' against The ROM
     - name: Test Local Manifests
       if: ${{ github.event.inputs.BUILD_DIFFERENT_ROM != 'skip' }}
-      env:
-        INPUT_REMOVALS: ${{ github.event.inputs.REMOVALS }}
-        INPUT_BUILD_COMMAND: ${{ github.event.inputs.BUILD_COMMAND }}
-        INPUT_DEVICE_NAME: ${{ github.event.inputs.DEVICE_NAME }}
-        INPUT_PRODUCT_NAME: ${{ github.event.inputs.PRODUCT_NAME }}
-        INPUT_ACTOR: ${{ github.actor }}
       run: |
         rm -rf tester
         mkdir tester
@@ -525,6 +519,12 @@ jobs:
       # Create a 'crave' job for building.
     - name: Start compilation through 'crave'
       if: ${{ github.event.inputs.BUILD_DIFFERENT_ROM != 'skip' }}
+      env:
+        INPUT_REMOVALS: ${{ github.event.inputs.REMOVALS }}
+        INPUT_BUILD_COMMAND: ${{ github.event.inputs.BUILD_COMMAND }}
+        INPUT_DEVICE_NAME: ${{ github.event.inputs.DEVICE_NAME }}
+        INPUT_PRODUCT_NAME: ${{ github.event.inputs.PRODUCT_NAME }}
+        INPUT_ACTOR: ${{ github.actor }}
       run: |
         set -euo pipefail
         cd "$PROJECTFOLDER"
