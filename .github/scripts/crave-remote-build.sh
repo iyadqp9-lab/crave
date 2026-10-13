@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Build the LineageOS 18.1 / Android 11 ROM for Samsung Galaxy Tab A SM-T355Y.
+set -Eeuo pipefail
+
+decode_b64() {
+  printf '%s' "$1" | base64 -d
+}
+
+BUILD_DIFFERENT_ROM="$(decode_b64 "${BUILD_DIFFERENT_ROM_B64:?missing build command}")"
+LOCAL_MANIFEST="$(decode_b64 "${LOCAL_MANIFEST_B64:?missing local manifest}")"
+REMOVALS="$(decode_b64 "${REMOVALS_B64:-}")"
+LUNCH="$(decode_b64 "${LUNCH_B64:?missing lunch target}")"
+BUILD_COMMAND="$(decode_b64 "${BUILD_COMMAND_B64:?missing build command}")"
+DEVICE_NAME="$(decode_b64 "${DEVICE_NAME_B64:?missing device codename}")"
+PRODUCT_NAME="$(decode_b64 "${PRODUCT_NAME_B64:?missing product name}")"
+BUILD_USERNAME="$(decode_b64 "${ACTOR_B64:-github-actions}")"
+BUILD_HOSTNAME="crave"
+export BUILD_USERNAME BUILD_HOSTNAME
+
+echo "=== IYAD AZIEZ OS build preflight ==="
+echo "Workspace: $(pwd)"
+echo "Device: $DEVICE_NAME"
+echo "Product: $PRODUCT_NAME"
+if [[ ! -d .repo ]]; then
+  echo "::error::No initialized Android .repo directory in the Crave workspace."
+  exit 10
+fi
+
+# Clean the old local manifest and only the extra paths the user requested.
+rm -rf .repo/local_manifests
+if [[ -n "$REMOVALS" ]]; then
+  while IFS= read -r remove_path; do
+    [[ -z "$remove_path" ]] || rm -rf -- "$remove_path"
+  done < <(printf '%s\n' "$REMOVALS" | tr ' ' '\n')
+fi
+
+echo "Initializing Android manifest..."
+bash -c "$BUILD_DIFFERENT_ROM"
+echo "Installing the IYAD AZIEZ local manifest..."
+bash -c "$LOCAL_MANIFEST"
+
+if ! find .repo/local_manifests -maxdepth 1 -type f -name '*.xml' -print -quit 2>/dev/null | grep -q .; then
+  echo "::error::No XML local manifest was downloaded into .repo/local_manifests."
+  find .repo/local_manifests -maxdepth 2 -type f -print 2>/dev/null || true
+  exit 11
+fi
+for manifest_file in .repo/local_manifests/*.xml; do
+  [[ -f "$manifest_file" ]] || continue
+  if ! grep -q '<manifest' "$manifest_file"; then
+    echo "::error::Invalid local manifest file: $manifest_file"
+    head -n 30 "$manifest_file" || true
+    exit 12
+  fi
+done
+
+echo "Syncing repositories..."
+if [[ -x /usr/bin/resync ]]; then
+  /usr/bin/resync
+elif [[ -x /opt/crave/resync.sh ]]; then
+  /opt/crave/resync.sh
+else
+  repo sync --force-sync --no-clone-bundle --no-tags -c -j2
+fi
+
+echo "Validating the target device tree..."
+if [[ ! -f "device/samsung/$DEVICE_NAME/device.mk" ]]; then
+  echo "::error::Device tree is missing: device/samsung/$DEVICE_NAME/device.mk"
+  echo "Manifest files:"
+  find .repo/local_manifests -maxdepth 2 -type f -print 2>/dev/null || true
+  echo "Relevant synced projects:"
+  repo list 2>/dev/null | grep -E 'device/samsung/(gt58lte|gte-common|msm8916-common)' || true
+  exit 13
+fi
+if [[ ! -f "device/samsung/$DEVICE_NAME/AndroidProducts.mk" ]]; then
+  echo "::error::AndroidProducts.mk is missing for $DEVICE_NAME."
+  exit 14
+fi
+if ! grep -RqsF "PRODUCT_NAME := $PRODUCT_NAME" "device/samsung/$DEVICE_NAME"; then
+  echo "::error::Product $PRODUCT_NAME was not found in the selected device tree."
+  grep -R "PRODUCT_NAME" "device/samsung/$DEVICE_NAME" || true
+  exit 15
+fi
+
+# Repair the two old proprietary GPS paths used by this device tree.
+sed -i \
+  -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_api_v02.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_api_v02.so#g' \
+  -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_ds_api.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_ds_api.so#g' \
+  "device/samsung/$DEVICE_NAME/device.mk"
+
+# Android 11's bundled Clang 3.8 requires the legacy ncurses5/tinfo5 ABI.
+# Extract the Ubuntu compatibility packages locally; no root/sudo is required.
+if ! ldconfig -p 2>/dev/null | grep -q 'libncurses\.so\.5' || ! ldconfig -p 2>/dev/null | grep -q 'libtinfo\.so\.5'; then
+  if [[ "$(uname -m)" != "x86_64" ]]; then
+    echo "::error::The ncurses compatibility packages are amd64-only; got $(uname -m)."
+    exit 16
+  fi
+  if ! command -v dpkg-deb >/dev/null 2>&1; then
+    echo "::error::dpkg-deb is unavailable; cannot unpack the legacy compatibility libraries."
+    exit 17
+  fi
+  NCURSES_ROOT="$HOME/.cache/iyad-aziez/ncurses5"
+  NCURSES_PACKAGES="$NCURSES_ROOT/packages"
+  NCURSES_EXTRACT="$NCURSES_ROOT/root"
+  mkdir -p "$NCURSES_PACKAGES" "$NCURSES_EXTRACT"
+  PACKAGE_BASE="https://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses"
+  for package in libtinfo5_6.2-0ubuntu2.1_amd64.deb libncurses5_6.2-0ubuntu2.1_amd64.deb; do
+    if [[ ! -s "$NCURSES_PACKAGES/$package" ]]; then
+      curl --fail --location --retry 3 --connect-timeout 20 \
+        "$PACKAGE_BASE/$package" --output "$NCURSES_PACKAGES/$package"
+    fi
+    dpkg-deb -f "$NCURSES_PACKAGES/$package" Architecture | grep -qx 'amd64'
+    dpkg-deb -x "$NCURSES_PACKAGES/$package" "$NCURSES_EXTRACT"
+  done
+  NCURSES_LIBRARY="$(find "$NCURSES_EXTRACT" -name 'libncurses.so.5' -print -quit)"
+  if [[ -z "$NCURSES_LIBRARY" ]]; then
+    echo "::error::libncurses.so.5 was not found after extracting the compatibility packages."
+    exit 18
+  fi
+  NCURSES_LIBRARY_DIR="$(dirname "$NCURSES_LIBRARY")"
+  if [[ ! -e "$NCURSES_LIBRARY_DIR/libtinfo.so.5" ]]; then
+    echo "::error::libtinfo.so.5 was not found alongside libncurses.so.5."
+    exit 19
+  fi
+  export LD_LIBRARY_PATH="$NCURSES_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+CLANG_BIN="prebuilts/clang/host/linux-x86/clang-3289846/bin"
+for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
+  if [[ ! -x "$legacy_tool" ]]; then
+    echo "::error::Expected Android 11 tool is missing: $legacy_tool"
+    exit 20
+  fi
+  if ldd "$legacy_tool" 2>&1 | grep -q 'not found'; then
+    echo "::error::Unresolved shared library dependency for $legacy_tool"
+    ldd "$legacy_tool" || true
+    exit 21
+  fi
+  "$legacy_tool" --version >/dev/null
+done
+echo "Legacy compiler dependencies are available."
+
+source build/envsetup.sh
+eval "$LUNCH"
+make installclean
+echo "Starting ROM compilation..."
+eval "$BUILD_COMMAND"
+
+OUTPUT_DIR="out/target/product/$DEVICE_NAME"
+ROM_ZIP="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.zip' -print -quit 2>/dev/null || true)"
+if [[ -z "$ROM_ZIP" ]]; then
+  echo "::error::Build command completed but no flashable ZIP was found in $OUTPUT_DIR."
+  ls -lah "$OUTPUT_DIR" 2>/dev/null || true
+  exit 22
+fi
+echo "Build produced flashable ZIP(s):"
+find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.zip' -print
