@@ -332,6 +332,12 @@ jobs:
       # Test Your Personal 'Local Manifests' against The ROM
     - name: Test Local Manifests
       if: ${{ github.event.inputs.BUILD_DIFFERENT_ROM != 'skip' }}
+      env:
+        INPUT_REMOVALS: ${{ github.event.inputs.REMOVALS }}
+        INPUT_BUILD_COMMAND: ${{ github.event.inputs.BUILD_COMMAND }}
+        INPUT_DEVICE_NAME: ${{ github.event.inputs.DEVICE_NAME }}
+        INPUT_PRODUCT_NAME: ${{ github.event.inputs.PRODUCT_NAME }}
+        INPUT_ACTOR: ${{ github.actor }}
       run: |
         rm -rf tester
         mkdir tester
@@ -428,33 +434,28 @@ jobs:
       run: |
         echo "DCDEVSPACE status: ${DCDEVSPACE}"
         if [[ $DCDEVSPACE != *1* ]]; then
-
-          #curl -s https://raw.githubusercontent.com/accupara/crave/master/get_crave.sh | bash -s -- 
-
-          #mkdir -p ${HOME}/bin/
-          #mv ${PWD}/crave ${HOME}/bin/ 
-          #sudo ln -sf /home/${USER}/bin/crave /usr/bin/crave; sudo chmod +x /usr/bin/crave 
-
           echo "Symlinking devspace folder"
           mkdir -p devspace
           sudo mkdir -p /crave-devspaces
-          sudo ln -sf ${pwd}/devspace /crave-devspaces
+          sudo ln -sfn "${PWD}/devspace" /crave-devspaces
           sudo chmod 777 /crave-devspaces
         else
           echo "We are already running in devspace... Skipping Symlinks"
         fi
-        if grep -q "$PROJECTFOLDER" <(crave clone list --json | jq -r '.clones[]."Cloned At"') || [[ "${DCDEVSPACE}" == "1" ]]; then
-          crave clone destroy -y $PROJECTFOLDER || echo "Error removing $PROJECTFOLDER"
-        else          
-        echo "Skipping removal"
+
+        if [[ "$DCDEVSPACE" == *1* ]]; then
+          CLONE_NAME="${PROJECTFOLDER##*/}"
+          if crave clone list --json | jq -e --arg dest "$CLONE_NAME" '.clones[]? | select((."Cloned At" | tostring | split("/") | last) == $dest)' >/dev/null; then
+            echo "Removing existing Crave clone: $CLONE_NAME"
+            crave clone destroy -y "$PROJECTFOLDER"
+          else
+            echo "No existing Crave clone named $CLONE_NAME; creating a fresh clone."
+          fi
+          crave clone create --projectID "$PROJECTID" "$PROJECTFOLDER"
+        else
+          mkdir -p "$PROJECTFOLDER"
         fi
 
-        if [[ $DCDEVSPACE == *1* ]]; then
-          crave clone create --projectID $PROJECTID $PROJECTFOLDER || echo "Crave clone create failed!"
-        else
-          mkdir -p $PROJECTFOLDER
-        fi
-        
       # Check-out in order to access the repository's files.
     - name: Check-out to repository
       uses: actions/checkout@v4
@@ -525,74 +526,39 @@ jobs:
     - name: Start compilation through 'crave'
       if: ${{ github.event.inputs.BUILD_DIFFERENT_ROM != 'skip' }}
       run: |
-        cd $PROJECTFOLDER
-        
-        jq '.projects = []' ~/crave.conf > tmp && mv tmp ~/crave.conf
-        if [ "${{ github.event.inputs.CLEAN_BUILD }}" == "yes" ]; then
-           export CLEAN="--clean"
-        fi
+        set -euo pipefail
+        cd "$PROJECTFOLDER"
+        bash -n "$GITHUB_WORKSPACE/.github/scripts/crave-remote-build.sh"
 
+        jq '.projects = []' "$HOME/crave.conf" > "$RUNNER_TEMP/crave.conf.tmp"
+        mv "$RUNNER_TEMP/crave.conf.tmp" "$HOME/crave.conf"
+
+        PAID=""
+        CLEAN=""
         if [[ -n "${{ secrets.PAID }}" ]]; then
-           echo "Paid Build... Tokens will be consumed."
-           export PAID="--platform aosp-silver"
+          echo "Paid Build... Tokens will be consumed."
+          PAID="--platform aosp-silver"
+        fi
+        if [[ "${{ github.event.inputs.CLEAN_BUILD }}" == "yes" ]]; then
+          CLEAN="--clean"
         fi
 
-        echo "Build is queued! Please wait for your build to start."
-        echo "Check foss.crave.io Dashboard to see builds"
-        echo "Running build's log will show up here!"
+        # Base64 prevents nested shell quotes/newlines from corrupting the Crave command.
+        BUILD_DIFFERENT_ROM_B64="$(printf '%s' "$BUILD_DIFFERENT_ROM" | base64 -w 0)"
+        LOCAL_MANIFEST_B64="$(printf '%s' "$LOCAL_MANIFEST" | base64 -w 0)"
+        REMOVALS_B64="$(printf '%s' "$INPUT_REMOVALS" | base64 -w 0)"
+        LUNCH_B64="$(printf '%s' "$LUNCH" | base64 -w 0)"
+        BUILD_COMMAND_B64="$(printf '%s' "$INPUT_BUILD_COMMAND" | base64 -w 0)"
+        DEVICE_NAME_B64="$(printf '%s' "$INPUT_DEVICE_NAME" | base64 -w 0)"
+        PRODUCT_NAME_B64="$(printf '%s' "$INPUT_PRODUCT_NAME" | base64 -w 0)"
+        ACTOR_B64="$(printf '%s' "$INPUT_ACTOR" | base64 -w 0)"
+        REMOTE_SCRIPT_B64="$(base64 -w 0 "$GITHUB_WORKSPACE/.github/scripts/crave-remote-build.sh")"
 
+        REMOTE_COMMAND="export BUILD_DIFFERENT_ROM_B64='$BUILD_DIFFERENT_ROM_B64' LOCAL_MANIFEST_B64='$LOCAL_MANIFEST_B64' REMOVALS_B64='$REMOVALS_B64' LUNCH_B64='$LUNCH_B64' BUILD_COMMAND_B64='$BUILD_COMMAND_B64' DEVICE_NAME_B64='$DEVICE_NAME_B64' PRODUCT_NAME_B64='$PRODUCT_NAME_B64' ACTOR_B64='$ACTOR_B64'; printf '%s' '$REMOTE_SCRIPT_B64' | base64 -d > /tmp/iyad-aziez-build.sh && bash /tmp/iyad-aziez-build.sh"
 
-        crave ${{ secrets.CRAVE_FLAGS }} run --no-patch ${PAID} ${CLEAN} -- "rm -rf .repo/local_manifests/ ${{ github.event.inputs.REMOVALS }} && \
-        # Clone local_manifests repository
-        $BUILD_DIFFERENT_ROM ; \
-        $LOCAL_MANIFEST && \
-
-        # Sync the repositories
-        if [ -f /usr/bin/resync ]; then
-          /usr/bin/resync # For compatibility with Omansh's Docker image 
-        else
-          /opt/crave/resync.sh
-        fi && \
-
-        # Fix legacy GPS blob source paths in the SM-T355Y device tree.
-        # The shared vendor tree stores these libraries under proprietary/vendor/lib.
-        if [ -f device/samsung/gt58lte/device.mk ]; then
-          sed -i \
-            -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_api_v02.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_api_v02.so#g' \
-            -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_ds_api.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_ds_api.so#g' \
-            device/samsung/gt58lte/device.mk
-          grep -n 'libloc_.*api' device/samsung/gt58lte/device.mk
-        else
-          echo "::error::Expected device/samsung/gt58lte/device.mk was not found after repo sync."
-          exit 1
-        fi && \
-
-        # Android 11's bundled Clang 3.8 needs the legacy libncurses.so.5 ABI.
-        # Install it INSIDE the Crave build environment, not only on the GitHub runner.
-        if ! ldconfig -p 2>/dev/null | grep -q 'libncurses.so.5'; then
-          echo "libncurses.so.5 is missing; installing the compatibility package in the Crave environment."
-          if [ "$(id -u)" -eq 0 ]; then
-            apt-get update && apt-get install -y libncurses5
-          elif command -v sudo >/dev/null 2>&1; then
-            sudo -n apt-get update && sudo -n apt-get install -y libncurses5
-          else
-            echo "::error::Cannot install libncurses5: Crave environment has no root/sudo access."
-            exit 1
-          fi
-        fi && \\
-        ldconfig -p 2>/dev/null | grep -q 'libncurses.so.5' && \\
-        # Set up build environment
-        export BUILD_USERNAME=${{ github.actor }} ; \
-        export BUILD_HOSTNAME=crave ; \
-        source build/envsetup.sh && \
-
-        echo "Repository: ${{ github.repository }}"; \
-        echo "Run ID: ${{ github.run_id }}"; \
-
-        # Build the ROM
-        $LUNCH && \
-        make installclean && \
-        ${{ github.event.inputs.BUILD_COMMAND }}"
+        echo "Starting Crave build using the quote-safe remote script..."
+        echo "Build log: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        crave ${{ secrets.CRAVE_FLAGS }} run --no-patch $PAID $CLEAN -- "$REMOTE_COMMAND"
       timeout-minutes: 1440
 
       # Send Build 'status' notification (Success)
@@ -682,8 +648,9 @@ jobs:
     - name: Destroy Crave Clone
       if: ${{ always() }}
       run: |
-        if grep -q "$PROJECTFOLDER" <(crave clone list --json | jq -r '.clones[]."Cloned At"') || [[ "${DCDEVSPACE}" == "1" ]]; then
-          crave clone destroy -y $PROJECTFOLDER || echo "Error removing $PROJECTFOLDER"
-        else          
-          echo "Skipping removal"
+        CLONE_NAME="${PROJECTFOLDER##*/}"
+        if [[ "${DCDEVSPACE}" == *1* ]] && crave clone list --json | jq -e --arg dest "$CLONE_NAME" '.clones[]? | select((."Cloned At" | tostring | split("/") | last) == $dest)' >/dev/null; then
+          crave clone destroy -y "$PROJECTFOLDER" || echo "Warning: Crave clone cleanup did not complete."
+        else
+          echo "No matching Crave clone found; skipping cleanup."
         fi
