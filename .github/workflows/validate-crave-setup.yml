@@ -1,0 +1,34 @@
+name: Validate Crave build setup
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/selfhosted.yml"
+      - ".github/scripts/crave-remote-build.sh"
+      - ".github/workflows/validate-crave-setup.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate remote build script syntax
+        run: bash -n .github/scripts/crave-remote-build.sh
+
+      - name: Validate workflow YAML syntax
+        run: |
+          ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/selfhosted.yml"); YAML.parse_file(".github/workflows/validate-crave-setup.yml"); puts "Workflow YAML parses successfully."'
+
+      - name: Check fixed Android 11 build settings
+        run: |
+          grep -q "PRODUCT_NAME := lineage_gt58lte" .github/scripts/crave-remote-build.sh
+          grep -q "libncurses5_6.2-0ubuntu2.1_amd64.deb" .github/scripts/crave-remote-build.sh
+          grep -q "REMOTE_SCRIPT_B64" .github/workflows/selfhosted.yml
