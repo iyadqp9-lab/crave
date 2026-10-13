@@ -23,9 +23,21 @@ jobs:
       - name: Validate remote build script syntax
         run: bash -n .github/scripts/crave-remote-build.sh
 
-      - name: Validate workflow YAML syntax
+      - name: Validate workflow YAML and runner shell syntax
         run: |
-          ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/selfhosted.yml"); YAML.parse_file(".github/workflows/validate-crave-setup.yml"); puts "Workflow YAML parses successfully."'
+          ruby <<'RUBY'
+          require "yaml"
+          YAML.parse_file(".github/workflows/selfhosted.yml")
+          YAML.parse_file(".github/workflows/validate-crave-setup.yml")
+          workflow = YAML.load_file(".github/workflows/selfhosted.yml")
+          step = workflow.fetch("jobs").fetch("build").fetch("steps").find do |item|
+            item["name"] == "Start compilation through 'crave'"
+          end
+          abort "Could not find the Crave compile step." unless step && step["run"]
+          File.write(File.join(ENV.fetch("RUNNER_TEMP"), "crave-compile-step.sh"), step.fetch("run"))
+          puts "Workflow YAML parses and the build step was extracted."
+          RUBY
+          bash -n "$RUNNER_TEMP/crave-compile-step.sh"
 
       - name: Check Crave build inputs and compatibility libraries
         run: |
