@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the LineageOS 18.1 / Android 11 ROM for Samsung Galaxy Tab A SM-T355Y.
-set -Eeuo pipefail
+set -Eeo pipefail
 
 decode_b64() {
   printf '%s' "$1" | base64 -d
