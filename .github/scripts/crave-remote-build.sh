@@ -88,41 +88,42 @@ sed -i \
   "device/samsung/$DEVICE_NAME/device.mk"
 
 # Android 11's bundled Clang 3.8 requires the legacy ncurses5/tinfo5 ABI.
-# Extract the Ubuntu compatibility packages locally; no root/sudo is required.
-if ! ldconfig -p 2>/dev/null | grep -q 'libncurses\.so\.5' || ! ldconfig -p 2>/dev/null | grep -q 'libtinfo\.so\.5'; then
-  if [[ "$(uname -m)" != "x86_64" ]]; then
-    echo "::error::The ncurses compatibility packages are amd64-only; got $(uname -m)."
-    exit 16
-  fi
-  if ! command -v dpkg-deb >/dev/null 2>&1; then
-    echo "::error::dpkg-deb is unavailable; cannot unpack the legacy compatibility libraries."
-    exit 17
-  fi
-  NCURSES_ROOT="$HOME/.cache/iyad-aziez/ncurses5"
-  NCURSES_PACKAGES="$NCURSES_ROOT/packages"
-  NCURSES_EXTRACT="$NCURSES_ROOT/root"
-  mkdir -p "$NCURSES_PACKAGES" "$NCURSES_EXTRACT"
-  PACKAGE_BASE="https://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses"
-  for package in libtinfo5_6.2-0ubuntu2.1_amd64.deb libncurses5_6.2-0ubuntu2.1_amd64.deb; do
-    if [[ ! -s "$NCURSES_PACKAGES/$package" ]]; then
-      curl --fail --location --retry 3 --connect-timeout 20 \
-        "$PACKAGE_BASE/$package" --output "$NCURSES_PACKAGES/$package"
-    fi
-    dpkg-deb -f "$NCURSES_PACKAGES/$package" Architecture | grep -qx 'amd64'
-    dpkg-deb -x "$NCURSES_PACKAGES/$package" "$NCURSES_EXTRACT"
-  done
-  NCURSES_LIBRARY="$(find "$NCURSES_EXTRACT" -name 'libncurses.so.5' -print -quit)"
-  if [[ -z "$NCURSES_LIBRARY" ]]; then
-    echo "::error::libncurses.so.5 was not found after extracting the compatibility packages."
-    exit 18
-  fi
-  NCURSES_LIBRARY_DIR="$(dirname "$NCURSES_LIBRARY")"
-  if [[ ! -e "$NCURSES_LIBRARY_DIR/libtinfo.so.5" ]]; then
-    echo "::error::libtinfo.so.5 was not found alongside libncurses.so.5."
-    exit 19
-  fi
-  export LD_LIBRARY_PATH="$NCURSES_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Always extract and prepend these libraries: ldconfig can report host libraries
+# that are not visible to the isolated build process used by Crave.
+if [[ "$(uname -m)" != "x86_64" ]]; then
+  echo "::error::The ncurses compatibility packages are amd64-only; got $(uname -m)."
+  exit 16
 fi
+if ! command -v dpkg-deb >/dev/null 2>&1; then
+  echo "::error::dpkg-deb is unavailable; cannot unpack the legacy compatibility libraries."
+  exit 17
+fi
+NCURSES_ROOT="$HOME/.cache/iyad-aziez/ncurses5"
+NCURSES_PACKAGES="$NCURSES_ROOT/packages"
+NCURSES_EXTRACT="$NCURSES_ROOT/root"
+mkdir -p "$NCURSES_PACKAGES" "$NCURSES_EXTRACT"
+PACKAGE_BASE="https://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses"
+for package in libtinfo5_6.2-0ubuntu2.1_amd64.deb libncurses5_6.2-0ubuntu2.1_amd64.deb; do
+  if [[ ! -s "$NCURSES_PACKAGES/$package" ]]; then
+    curl --fail --location --retry 3 --connect-timeout 20 \
+      "$PACKAGE_BASE/$package" --output "$NCURSES_PACKAGES/$package"
+  fi
+  dpkg-deb -f "$NCURSES_PACKAGES/$package" Architecture | grep -qx 'amd64'
+  dpkg-deb -x "$NCURSES_PACKAGES/$package" "$NCURSES_EXTRACT"
+done
+NCURSES_LIBRARY="$(find "$NCURSES_EXTRACT" -name 'libncurses.so.5' -print -quit)"
+if [[ -z "$NCURSES_LIBRARY" ]]; then
+  echo "::error::libncurses.so.5 was not found after extracting the compatibility packages."
+  exit 18
+fi
+NCURSES_LIBRARY_DIR="$(dirname "$NCURSES_LIBRARY")"
+if [[ ! -e "$NCURSES_LIBRARY_DIR/libtinfo.so.5" ]]; then
+  echo "::error::libtinfo.so.5 was not found alongside libncurses.so.5."
+  exit 19
+fi
+export LD_LIBRARY_PATH="$NCURSES_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+echo "Using legacy compiler libraries from: $NCURSES_LIBRARY_DIR"
+ls -l "$NCURSES_LIBRARY_DIR"/libncurses.so.5 "$NCURSES_LIBRARY_DIR"/libtinfo.so.5
 
 CLANG_BIN="prebuilts/clang/host/linux-x86/clang-3289846/bin"
 for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
