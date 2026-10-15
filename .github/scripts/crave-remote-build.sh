@@ -143,6 +143,22 @@ echo "Legacy compiler dependencies are available."
 source build/envsetup.sh
 eval "$LUNCH"
 make installclean
+
+# Android build setup may rewrite LD_LIBRARY_PATH; restore the legacy ABI path
+# immediately before compilation so Ninja's clang/llvm-as subprocesses inherit it.
+export LD_LIBRARY_PATH="$NCURSES_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+echo "Final compiler library path: $LD_LIBRARY_PATH"
+for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
+  echo "Checking legacy compiler after envsetup: $legacy_tool"
+  ldd "$legacy_tool" | grep -E 'lib(ncurses|tinfo)\.so\.5'
+  if ldd "$legacy_tool" 2>&1 | grep -q 'not found'; then
+    echo "::error::Unresolved shared library dependency after envsetup for $legacy_tool"
+    ldd "$legacy_tool" || true
+    exit 23
+  fi
+  "$legacy_tool" --version >/dev/null
+done
+echo "Legacy compiler dependencies verified immediately before compilation."
 echo "Starting ROM compilation..."
 eval "$BUILD_COMMAND"
 
