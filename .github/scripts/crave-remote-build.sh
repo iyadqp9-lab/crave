@@ -130,12 +130,12 @@ ls -l "$NCURSES_LIBRARY_DIR"/libncurses.so.5 "$NCURSES_LIBRARY_DIR"/libtinfo.so.
 PATCHELF_BIN="$(command -v patchelf || true)"
 if [[ -z "$PATCHELF_BIN" ]]; then
   PATCHELF_ROOT="$HOME/.cache/iyad-aziez/patchelf"
-  PATCHELF_DEB="$PATCHELF_ROOT/patchelf_0.14.3-1_amd64.deb"
+  PATCHELF_DEB="$PATCHELF_ROOT/patchelf_0.14.3-1+b1_amd64.deb"
   PATCHELF_EXTRACT="$PATCHELF_ROOT/root"
   mkdir -p "$PATCHELF_ROOT" "$PATCHELF_EXTRACT"
   if [[ ! -s "$PATCHELF_DEB" ]]; then
     curl --fail --location --retry 3 --connect-timeout 20 \
-      "https://deb.debian.org/debian/pool/main/p/patchelf/patchelf_0.14.3-1_amd64.deb" \
+      "https://deb.debian.org/debian/pool/main/p/patchelf/patchelf_0.14.3-1+b1_amd64.deb" \
       --output "$PATCHELF_DEB"
   fi
   dpkg-deb -f "$PATCHELF_DEB" Architecture | grep -qx 'amd64'
