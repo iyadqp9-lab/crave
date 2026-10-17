@@ -87,6 +87,18 @@ sed -i \
   -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_ds_api.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_ds_api.so#g' \
   "device/samsung/$DEVICE_NAME/device.mk"
 
+# The upstream SM-T355Y device tree requests a regional kernel config fragment,
+# but the selected Galaxy-MSM8916 lineage-17.1 kernel branch does not ship it.
+# Keep the generic msm8916_sec_defconfig as the base and create an EMPTY fragment
+# only when the exact AUS fragment is missing; do not copy another model/region's config.
+if [[ "$DEVICE_NAME" == "gt58lte" && -d kernel/samsung/msm8916/arch/arm/configs ]]; then
+  AUS_VARIANT_CONFIG="kernel/samsung/msm8916/arch/arm/configs/msm8916_sec_gt58lte_aus_defconfig"
+  if [[ ! -f "$AUS_VARIANT_CONFIG" ]]; then
+    echo "::warning::Kernel branch lacks msm8916_sec_gt58lte_aus_defconfig; creating an empty regional fragment and retaining the generic msm8916_sec_defconfig."
+    : > "$AUS_VARIANT_CONFIG"
+  fi
+fi
+
 # Android 11's bundled Clang 3.8 requires the legacy ncurses5/tinfo5 ABI.
 # Always extract and prepend these libraries: ldconfig can report host libraries
 # that are not visible to the isolated build process used by Crave.
