@@ -125,14 +125,43 @@ export LD_LIBRARY_PATH="$NCURSES_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH
 echo "Using legacy compiler libraries from: $NCURSES_LIBRARY_DIR"
 ls -l "$NCURSES_LIBRARY_DIR"/libncurses.so.5 "$NCURSES_LIBRARY_DIR"/libtinfo.so.5
 
+# Some Android build/Ninja subprocesses sanitize LD_LIBRARY_PATH. Embed an ELF
+# RPATH in the legacy tools so the dynamic loader can still find ncurses5.
+PATCHELF_BIN="$(command -v patchelf || true)"
+if [[ -z "$PATCHELF_BIN" ]]; then
+  PATCHELF_ROOT="$HOME/.cache/iyad-aziez/patchelf"
+  PATCHELF_DEB="$PATCHELF_ROOT/patchelf_0.14.3-1_amd64.deb"
+  PATCHELF_EXTRACT="$PATCHELF_ROOT/root"
+  mkdir -p "$PATCHELF_ROOT" "$PATCHELF_EXTRACT"
+  if [[ ! -s "$PATCHELF_DEB" ]]; then
+    curl --fail --location --retry 3 --connect-timeout 20 \
+      "https://deb.debian.org/debian/pool/main/p/patchelf/patchelf_0.14.3-1_amd64.deb" \
+      --output "$PATCHELF_DEB"
+  fi
+  dpkg-deb -f "$PATCHELF_DEB" Architecture | grep -qx 'amd64'
+  dpkg-deb -x "$PATCHELF_DEB" "$PATCHELF_EXTRACT"
+  PATCHELF_BIN="$(find "$PATCHELF_EXTRACT" -type f -name patchelf -print -quit)"
+fi
+if [[ -z "$PATCHELF_BIN" || ! -x "$PATCHELF_BIN" ]]; then
+  echo "::error::Could not obtain patchelf to fix legacy compiler runtime paths."
+  exit 24
+fi
+
 CLANG_BIN="prebuilts/clang/host/linux-x86/clang-3289846/bin"
 for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
   if [[ ! -x "$legacy_tool" ]]; then
     echo "::error::Expected Android 11 tool is missing: $legacy_tool"
     exit 20
   fi
+  old_rpath="$("$PATCHELF_BIN" --print-rpath "$legacy_tool" 2>/dev/null || true)"
+  new_rpath="$NCURSES_LIBRARY_DIR"
+  if [[ -n "$old_rpath" ]]; then
+    new_rpath="$new_rpath:$old_rpath"
+  fi
+  "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$legacy_tool"
+  echo "Patched RPATH for $legacy_tool: $("$PATCHELF_BIN" --print-rpath "$legacy_tool")"
   if ldd "$legacy_tool" 2>&1 | grep -q 'not found'; then
-    echo "::error::Unresolved shared library dependency for $legacy_tool"
+    echo "::error::Unresolved shared library dependency for $legacy_tool after RPATH patch."
     ldd "$legacy_tool" || true
     exit 21
   fi
@@ -144,12 +173,13 @@ source build/envsetup.sh
 eval "$LUNCH"
 make installclean
 
-# Android build setup may rewrite LD_LIBRARY_PATH; restore the legacy ABI path
-# immediately before compilation so Ninja's clang/llvm-as subprocesses inherit it.
+# Restore the shell environment too, but rely on the embedded RPATH above
+# because Android build tools may sanitize LD_LIBRARY_PATH for child processes.
 export LD_LIBRARY_PATH="$NCURSES_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 echo "Final compiler library path: $LD_LIBRARY_PATH"
 for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
-  echo "Checking legacy compiler after envsetup: $legacy_tool"
+  echo "Checking legacy compiler RPATH after envsetup: $legacy_tool"
+  "$PATCHELF_BIN" --print-rpath "$legacy_tool"
   ldd "$legacy_tool" | grep -E 'lib(ncurses|tinfo)\.so\.5'
   if ldd "$legacy_tool" 2>&1 | grep -q 'not found'; then
     echo "::error::Unresolved shared library dependency after envsetup for $legacy_tool"
@@ -158,7 +188,7 @@ for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
   fi
   "$legacy_tool" --version >/dev/null
 done
-echo "Legacy compiler dependencies verified immediately before compilation."
+echo "Legacy compiler RPATH dependencies verified immediately before compilation."
 echo "Starting ROM compilation..."
 eval "$BUILD_COMMAND"
 
