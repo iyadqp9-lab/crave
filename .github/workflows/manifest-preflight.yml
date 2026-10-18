@@ -96,3 +96,18 @@ jobs:
               sys.exit(f"Manifest preflight failed: {len(errors)} project(s) need attention.")
           print(f"Manifest preflight passed: all {len(projects)} source branches are reachable.")
           PY
+
+      - name: Verify device model and kernel defconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEVICE_BASE="https://raw.githubusercontent.com/user20482020/device_samsung_gt58lte/lineage-18.1-gt58lte"
+          KERNEL_BASE="https://raw.githubusercontent.com/user20482020/android_kernel_samsung_msm8916/lineage-18.1"
+          curl --fail --show-error --location "$DEVICE_BASE/BoardConfig.mk" --output /tmp/gt58lte-BoardConfig.mk
+          curl --fail --show-error --location "$DEVICE_BASE/lineage_gt58lte.mk" --output /tmp/lineage_gt58lte.mk
+          curl --fail --show-error --location "$KERNEL_BASE/arch/arm/configs/msm8916_sec_gt58lte_aus_defconfig" --output /tmp/msm8916_sec_gt58lte_aus_defconfig
+          grep -q "SM-T355Y" /tmp/gt58lte-BoardConfig.mk
+          grep -q "PRODUCT_NAME := lineage_gt58lte" /tmp/lineage_gt58lte.mk
+          grep -q "PRODUCT_MODEL := SM-T355Y" /tmp/lineage_gt58lte.mk
+          grep -q "CONFIG_MACH_GT58_SEA_XSA=y" /tmp/msm8916_sec_gt58lte_aus_defconfig
+          echo "Verified: SM-T355Y board assertion, lineage_gt58lte product, and AUS kernel config."
