@@ -1,0 +1,98 @@
+name: SM-T355Y Manifest Preflight
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/manifest-preflight.yml"
+      - ".github/workflows/selfhosted.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate SM-T355Y source branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MANIFEST_URL: https://raw.githubusercontent.com/iyadqp9-lab/iyad-aziez/setup/lineage20-gt58lte/manifests/lineage-18.1/gt58lte.xml
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Download and validate manifest sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .repo/local_manifests
+          curl --fail --show-error --location --retry 3 "$MANIFEST_URL" \
+            --output .repo/local_manifests/gt58lte.xml
+
+          python3 - <<'PY'
+          import concurrent.futures
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          manifest_path = Path(".repo/local_manifests/gt58lte.xml")
+          try:
+              root = ET.parse(manifest_path).getroot()
+          except ET.ParseError as exc:
+              sys.exit(f"ERROR: Invalid XML: {exc}")
+
+          remotes = {
+              remote.get("name"): remote.get("fetch", "")
+              for remote in root.findall("remote")
+          }
+          projects = root.findall("project")
+          if not projects:
+              sys.exit("ERROR: The manifest has no projects.")
+
+          required_paths = {
+              "device/samsung/gt58lte",
+              "device/samsung/gte-common",
+              "device/samsung/msm8916-common",
+              "kernel/samsung/msm8916",
+              "vendor/samsung/gt58lte",
+          }
+          paths = [project.get("path") for project in projects]
+          if len(paths) != len(set(paths)):
+              sys.exit("ERROR: Duplicate project paths in the manifest.")
+          missing = sorted(required_paths - set(paths))
+          if missing:
+              sys.exit("ERROR: Required target paths missing: " + ", ".join(missing))
+
+          def check(project):
+              name = project.get("name")
+              path = project.get("path")
+              revision = project.get("revision")
+              remote = remotes.get(project.get("remote"), "")
+              if not all((name, path, revision, remote)):
+                  return False, path or name or "<unnamed>", "missing project name/path/revision or remote"
+              url = remote.rstrip("/") + "/" + name + ".git"
+              try:
+                  proc = subprocess.run(
+                      ["git", "ls-remote", "--exit-code", "--heads", url, f"refs/heads/{revision}"],
+                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                      text=True, timeout=60, check=False
+                  )
+              except subprocess.TimeoutExpired:
+                  return False, path, f"timed out checking {url} @ {revision}"
+              if proc.returncode != 0 or not proc.stdout.strip():
+                  return False, path, f"branch unavailable: {url} @ {revision}\n{proc.stdout.strip()}"
+              return True, path, f"{name} @ {revision}"
+
+          errors = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              for ok, path, details in pool.map(check, projects):
+                  print(("OK: " if ok else "ERROR: ") + f"{path} — {details}")
+                  if not ok:
+                      errors.append(path)
+
+          if errors:
+              sys.exit(f"Manifest preflight failed: {len(errors)} project(s) need attention.")
+          print(f"Manifest preflight passed: all {len(projects)} source branches are reachable.")
+          PY
