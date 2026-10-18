@@ -202,12 +202,13 @@ for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
 done
 echo "Legacy compiler RPATH dependencies verified immediately before compilation."
 
-# The LineageOS 18.1 host build also invokes generated Soong tools such as
-# out/soong/host/linux-x86/bin/llvm-tblgen. These are separate from the bundled
-# Clang binaries above and may still require libncurses.so.5. Patch only ELF
-# executables whose dependencies show the legacy libraries as missing.
+# Soong generates host tools such as llvm-tblgen during the build, after the
+# initial preflight. A one-time scan misses those newly-created executables.
+# Keep a lightweight watcher running while Ninja builds, and embed the legacy
+# library path as soon as a generated executable needs ncurses5/tinfo5.
 SOONG_HOST_BIN="out/soong/host/linux-x86/bin"
-if [[ -d "$SOONG_HOST_BIN" ]]; then
+patch_soong_host_tools() {
+  [[ -d "$SOONG_HOST_BIN" ]] || return 0
   while IFS= read -r -d '' host_tool; do
     [[ -x "$host_tool" ]] || continue
     tool_deps="$(ldd "$host_tool" 2>/dev/null || true)"
@@ -215,17 +216,29 @@ if [[ -d "$SOONG_HOST_BIN" ]]; then
       old_rpath="$("$PATCHELF_BIN" --print-rpath "$host_tool" 2>/dev/null || true)"
       new_rpath="$NCURSES_LIBRARY_DIR"
       [[ -z "$old_rpath" ]] || new_rpath="$new_rpath:$old_rpath"
-      echo "Patching legacy ncurses RPATH for Soong host tool: $host_tool"
+      echo "Patching legacy ncurses RPATH for generated Soong host tool: $host_tool"
       "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$host_tool"
       tool_deps="$(ldd "$host_tool" 2>&1 || true)"
       if grep -q 'not found' <<<"$tool_deps"; then
         echo "::error::Unresolved dependencies remain for $host_tool"
         echo "$tool_deps"
-        exit 25
+        return 1
       fi
     fi
-  done < <(find "$SOONG_HOST_BIN" -maxdepth 1 -type f -executable -print0)
-fi
+  done < <(find "$SOONG_HOST_BIN" -maxdepth 1 -type f -executable -print0 2>/dev/null)
+}
+(
+  while :; do
+    patch_soong_host_tools || exit 1
+    sleep 0.15
+  done
+) &
+SOONG_PATCH_WATCHER_PID=$!
+cleanup_soong_watcher() {
+  kill "$SOONG_PATCH_WATCHER_PID" 2>/dev/null || true
+  wait "$SOONG_PATCH_WATCHER_PID" 2>/dev/null || true
+}
+trap cleanup_soong_watcher EXIT
 
 echo "Starting ROM compilation..."
 eval "$BUILD_COMMAND"
