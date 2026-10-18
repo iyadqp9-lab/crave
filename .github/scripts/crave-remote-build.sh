@@ -201,6 +201,32 @@ for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
   "$legacy_tool" --version >/dev/null
 done
 echo "Legacy compiler RPATH dependencies verified immediately before compilation."
+
+# The LineageOS 18.1 host build also invokes generated Soong tools such as
+# out/soong/host/linux-x86/bin/llvm-tblgen. These are separate from the bundled
+# Clang binaries above and may still require libncurses.so.5. Patch only ELF
+# executables whose dependencies show the legacy libraries as missing.
+SOONG_HOST_BIN="out/soong/host/linux-x86/bin"
+if [[ -d "$SOONG_HOST_BIN" ]]; then
+  while IFS= read -r -d '' host_tool; do
+    [[ -x "$host_tool" ]] || continue
+    tool_deps="$(ldd "$host_tool" 2>/dev/null || true)"
+    if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tool_deps"; then
+      old_rpath="$("$PATCHELF_BIN" --print-rpath "$host_tool" 2>/dev/null || true)"
+      new_rpath="$NCURSES_LIBRARY_DIR"
+      [[ -z "$old_rpath" ]] || new_rpath="$new_rpath:$old_rpath"
+      echo "Patching legacy ncurses RPATH for Soong host tool: $host_tool"
+      "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$host_tool"
+      tool_deps="$(ldd "$host_tool" 2>&1 || true)"
+      if grep -q 'not found' <<<"$tool_deps"; then
+        echo "::error::Unresolved dependencies remain for $host_tool"
+        echo "$tool_deps"
+        exit 25
+      fi
+    fi
+  done < <(find "$SOONG_HOST_BIN" -maxdepth 1 -type f -executable -print0)
+fi
+
 echo "Starting ROM compilation..."
 eval "$BUILD_COMMAND"
 
