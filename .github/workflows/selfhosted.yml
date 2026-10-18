@@ -348,8 +348,79 @@ jobs:
 
         bash -c "$LOCAL_MANIFEST"
 
-        timeout 1m repo sync --force-sync || { exit_code=$?; [ $exit_code -eq 124 ] || (echo "Error: Process failed with exit code $exit_code"; exit $exit_code); }
-        du -csh . # Output Size when done
+        # Validate every custom manifest project and branch explicitly.
+        # The previous 1-minute repo sync was allowed to time out and still pass,
+        # which could falsely label a broken manifest as successful.
+        python3 - <<'PY'
+        import concurrent.futures
+        import subprocess
+        import sys
+        import xml.etree.ElementTree as ET
+        from pathlib import Path
+
+        manifest_path = Path(".repo/local_manifests/local_manifest.xml")
+        if not manifest_path.is_file():
+            sys.exit(f"ERROR: Local manifest was not downloaded: {manifest_path}")
+
+        try:
+            root = ET.parse(manifest_path).getroot()
+        except ET.ParseError as exc:
+            sys.exit(f"ERROR: Invalid local manifest XML: {exc}")
+
+        remotes = {
+            node.get("name"): node.get("fetch", "")
+            for node in root.findall("remote")
+        }
+        projects = root.findall("project")
+        if not projects:
+            sys.exit("ERROR: Local manifest contains no project entries.")
+
+        def check_project(project):
+            name = project.get("name")
+            path = project.get("path")
+            revision = project.get("revision")
+            remote_name = project.get("remote")
+            base = remotes.get(remote_name, "")
+            if not name or not path or not revision or not base:
+                return False, path or name or "<unnamed>", "missing name/path/revision or remote"
+            url = base.rstrip("/") + "/" + name + ".git"
+            try:
+                result = subprocess.run(
+                    ["git", "ls-remote", "--exit-code", "--heads", url,
+                     f"refs/heads/{revision}"],
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    timeout=60, check=False
+                )
+            except subprocess.TimeoutExpired:
+                return False, path, f"timed out while checking {url} @ {revision}"
+            if result.returncode != 0 or not result.stdout.strip():
+                return False, path, f"branch not found or inaccessible: {url} @ {revision}\n{result.stdout.strip()}"
+            return True, path, f"{url} @ {revision}"
+
+        failures = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            for ok, path, details in pool.map(check_project, projects):
+                print(("OK: " if ok else "ERROR: ") + f"{path}: {details}")
+                if not ok:
+                    failures.append(path)
+
+        required_paths = {
+            "device/samsung/gt58lte",
+            "device/samsung/gte-common",
+            "device/samsung/msm8916-common",
+            "kernel/samsung/msm8916",
+            "vendor/samsung/gt58lte",
+        }
+        present_paths = {project.get("path") for project in projects}
+        missing = sorted(required_paths - present_paths)
+        if missing:
+            print("ERROR: Missing required device paths: " + ", ".join(missing))
+            failures.extend(missing)
+
+        if failures:
+            sys.exit(f"Manifest validation failed for {len(failures)} item(s).")
+        print(f"Manifest validation passed: all {len(projects)} repository branches exist.")
+        PY
         rm -rf .repo
       timeout-minutes: 10
     outputs:
