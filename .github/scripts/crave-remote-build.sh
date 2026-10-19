@@ -209,23 +209,32 @@ echo "Legacy compiler RPATH dependencies verified immediately before compilation
 SOONG_HOST_BIN="out/soong/host/linux-x86/bin"
 patch_soong_host_tools() {
   [[ -d "$SOONG_HOST_BIN" ]] || return 0
+
+  # Some generated Soong tools are symlinks into out/soong/.intermediates.
+  # The old "-type f" scan skipped those links, leaving llvm-tblgen unpatched.
   while IFS= read -r -d '' host_tool; do
     [[ -x "$host_tool" ]] || continue
-    tool_deps="$(ldd "$host_tool" 2>/dev/null || true)"
+    resolved_tool="$(readlink -f "$host_tool" 2>/dev/null || true)"
+    [[ -n "$resolved_tool" && -f "$resolved_tool" && -x "$resolved_tool" ]] || continue
+
+    tool_deps="$(ldd "$resolved_tool" 2>/dev/null || true)"
     if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tool_deps"; then
-      old_rpath="$("$PATCHELF_BIN" --print-rpath "$host_tool" 2>/dev/null || true)"
-      new_rpath="$NCURSES_LIBRARY_DIR"
-      [[ -z "$old_rpath" ]] || new_rpath="$new_rpath:$old_rpath"
-      echo "Patching legacy ncurses RPATH for generated Soong host tool: $host_tool"
-      "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$host_tool"
-      tool_deps="$(ldd "$host_tool" 2>&1 || true)"
+      old_rpath="$("$PATCHELF_BIN" --print-rpath "$resolved_tool" 2>/dev/null || true)"
+      case ":$old_rpath:" in
+        *":$NCURSES_LIBRARY_DIR:"*) new_rpath="$old_rpath" ;;
+        *) new_rpath="$NCURSES_LIBRARY_DIR"; [[ -z "$old_rpath" ]] || new_rpath="$new_rpath:$old_rpath" ;;
+      esac
+
+      echo "Patching legacy ncurses RPATH for generated Soong host tool: $host_tool -> $resolved_tool"
+      "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$resolved_tool"
+      tool_deps="$(ldd "$resolved_tool" 2>&1 || true)"
       if grep -q 'not found' <<<"$tool_deps"; then
-        echo "::error::Unresolved dependencies remain for $host_tool"
+        echo "::error::Unresolved dependencies remain for $host_tool ($resolved_tool)"
         echo "$tool_deps"
         return 1
       fi
     fi
-  done < <(find "$SOONG_HOST_BIN" -maxdepth 1 -type f -executable -print0 2>/dev/null)
+  done < <(find "$SOONG_HOST_BIN" -maxdepth 1 \( -type f -o -type l \) -executable -print0 2>/dev/null)
 }
 (
   while :; do
