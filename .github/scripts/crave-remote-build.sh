@@ -250,7 +250,32 @@ cleanup_soong_watcher() {
 trap cleanup_soong_watcher EXIT
 
 echo "Starting ROM compilation..."
-eval "$BUILD_COMMAND"
+BUILD_LOG="/tmp/iyad-aziez-build.log"
+set +e
+eval "$BUILD_COMMAND" 2>&1 | tee "$BUILD_LOG"
+BUILD_STATUS=${PIPESTATUS[0]}
+set -e
+
+# A newly generated Soong llvm-tblgen can be invoked before the background
+# watcher sees its symlink. If that exact old-library error occurs, patch all
+# generated tool targets and retry once; the existing outputs make this an
+# incremental retry rather than a clean rebuild.
+if [[ "$BUILD_STATUS" -ne 0 ]] && grep -Eq 'lib(ncurses|tinfo)\.so\.5: cannot open shared object file|error while loading shared libraries: lib(ncurses|tinfo)\.so\.5' "$BUILD_LOG"; then
+  echo "Legacy ncurses error detected. Patching generated Soong tools before one incremental retry."
+  if ! patch_soong_host_tools; then
+    echo "::error::Could not repair generated Soong tool dependencies; refusing an unpatched retry."
+    exit 25
+  fi
+  set +e
+  eval "$BUILD_COMMAND" 2>&1 | tee -a "$BUILD_LOG"
+  BUILD_STATUS=${PIPESTATUS[0]}
+  set -e
+fi
+
+if [[ "$BUILD_STATUS" -ne 0 ]]; then
+  echo "::error::ROM build failed with exit code $BUILD_STATUS."
+  exit "$BUILD_STATUS"
+fi
 
 OUTPUT_DIR="out/target/product/$DEVICE_NAME"
 ROM_ZIP="$(find "$OUTPUT_DIR" -maxdepth 1 -type f -name '*.zip' -print -quit 2>/dev/null || true)"
