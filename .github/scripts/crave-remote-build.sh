@@ -207,34 +207,66 @@ echo "Legacy compiler RPATH dependencies verified immediately before compilation
 # Keep a lightweight watcher running while Ninja builds, and embed the legacy
 # library path as soon as a generated executable needs ncurses5/tinfo5.
 SOONG_HOST_BIN="out/soong/host/linux-x86/bin"
+
+patch_one_soong_tool() {
+  local host_tool="$1"
+  [[ -e "$host_tool" || -L "$host_tool" ]] || return 0
+
+  local resolved_tool
+  resolved_tool="$(readlink -f "$host_tool" 2>/dev/null || true)"
+  [[ -n "$resolved_tool" && -f "$resolved_tool" && -x "$resolved_tool" ]] || return 0
+
+  local tool_deps
+  tool_deps="$(ldd "$resolved_tool" 2>/dev/null || true)"
+  if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tool_deps"; then
+    local old_rpath
+    old_rpath="$("$PATCHELF_BIN" --print-rpath "$resolved_tool" 2>/dev/null || true)"
+    local new_rpath="$NCURSES_LIBRARY_DIR"
+    case ":$old_rpath:" in
+      *":$NCURSES_LIBRARY_DIR:"*) new_rpath="$old_rpath" ;;
+      *) [[ -z "$old_rpath" ]] || new_rpath="$new_rpath:$old_rpath" ;;
+    esac
+
+    echo "Patching legacy ncurses RPATH for generated Soong host tool: $host_tool -> $resolved_tool"
+    "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$resolved_tool"
+    tool_deps="$(ldd "$resolved_tool" 2>&1 || true)"
+    if grep -q 'not found' <<<"$tool_deps"; then
+      echo "::error::Unresolved dependencies remain for $host_tool ($resolved_tool)"
+      echo "$tool_deps"
+      return 1
+    fi
+  fi
+}
+
 patch_soong_host_tools() {
   [[ -d "$SOONG_HOST_BIN" ]] || return 0
 
-  # Some generated Soong tools are symlinks into out/soong/.intermediates.
-  # The old "-type f" scan skipped those links, leaving llvm-tblgen unpatched.
+  # Do not filter with find's -executable predicate: the generated entries can
+  # be symlinks, and that predicate can skip the exact llvm-tblgen link we need.
   while IFS= read -r -d '' host_tool; do
-    [[ -x "$host_tool" ]] || continue
-    resolved_tool="$(readlink -f "$host_tool" 2>/dev/null || true)"
-    [[ -n "$resolved_tool" && -f "$resolved_tool" && -x "$resolved_tool" ]] || continue
+    patch_one_soong_tool "$host_tool" || return 1
+  done < <(find "$SOONG_HOST_BIN" -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
 
-    tool_deps="$(ldd "$resolved_tool" 2>/dev/null || true)"
-    if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tool_deps"; then
-      old_rpath="$("$PATCHELF_BIN" --print-rpath "$resolved_tool" 2>/dev/null || true)"
-      case ":$old_rpath:" in
-        *":$NCURSES_LIBRARY_DIR:"*) new_rpath="$old_rpath" ;;
-        *) new_rpath="$NCURSES_LIBRARY_DIR"; [[ -z "$old_rpath" ]] || new_rpath="$new_rpath:$old_rpath" ;;
-      esac
+  # Explicitly inspect the known TableGen launchers even if find behaves
+  # differently for symlinks on the host filesystem.
+  patch_one_soong_tool "$SOONG_HOST_BIN/llvm-tblgen" || return 1
+  patch_one_soong_tool "$SOONG_HOST_BIN/clang-tblgen" || return 1
 
-      echo "Patching legacy ncurses RPATH for generated Soong host tool: $host_tool -> $resolved_tool"
-      "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$resolved_tool"
-      tool_deps="$(ldd "$resolved_tool" 2>&1 || true)"
-      if grep -q 'not found' <<<"$tool_deps"; then
-        echo "::error::Unresolved dependencies remain for $host_tool ($resolved_tool)"
-        echo "$tool_deps"
+  # Never perform the incremental retry unless the launcher named in the
+  # observed build error can now resolve the legacy ncurses/tinfo libraries.
+  if [[ -x "$SOONG_HOST_BIN/llvm-tblgen" ]]; then
+    local resolved_tblgen
+    resolved_tblgen="$(readlink -f "$SOONG_HOST_BIN/llvm-tblgen" 2>/dev/null || true)"
+    if [[ -n "$resolved_tblgen" && -f "$resolved_tblgen" ]]; then
+      local tblgen_deps
+      tblgen_deps="$(ldd "$resolved_tblgen" 2>&1 || true)"
+      if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tblgen_deps"; then
+        echo "::error::llvm-tblgen still cannot resolve ncurses5/tinfo5; refusing to repeat the same failed build."
+        echo "$tblgen_deps"
         return 1
       fi
     fi
-  done < <(find "$SOONG_HOST_BIN" -maxdepth 1 \( -type f -o -type l \) -executable -print0 2>/dev/null)
+  fi
 }
 (
   while :; do
