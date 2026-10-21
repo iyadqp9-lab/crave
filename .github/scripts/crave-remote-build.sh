@@ -216,22 +216,36 @@ patch_one_soong_tool() {
   resolved_tool="$(readlink -f "$host_tool" 2>/dev/null || true)"
   [[ -n "$resolved_tool" && -f "$resolved_tool" && -x "$resolved_tool" ]] || return 0
 
+  # IMPORTANT: do not inherit LD_LIBRARY_PATH during this test. The Android
+  # build system sanitizes it for some Ninja subprocesses, so ordinary "ldd"
+  # can falsely say the dependency is available even though llvm-tblgen fails.
   local tool_deps
-  tool_deps="$(ldd "$resolved_tool" 2>/dev/null || true)"
+  tool_deps="$(env -u LD_LIBRARY_PATH ldd "$resolved_tool" 2>&1 || true)"
   if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tool_deps"; then
     local old_rpath
     old_rpath="$("$PATCHELF_BIN" --print-rpath "$resolved_tool" 2>/dev/null || true)"
+
+    # Prepend the compatibility-library directory and preserve all other
+    # existing RPATH entries, avoiding duplicate entries on every watcher pass.
     local new_rpath="$NCURSES_LIBRARY_DIR"
-    case ":$old_rpath:" in
-      *":$NCURSES_LIBRARY_DIR:"*) new_rpath="$old_rpath" ;;
-      *) [[ -z "$old_rpath" ]] || new_rpath="$new_rpath:$old_rpath" ;;
-    esac
+    local old_part
+    local -a rpath_parts=()
+    IFS=':' read -r -a rpath_parts <<< "$old_rpath"
+    for old_part in "${rpath_parts[@]}"; do
+      [[ -z "$old_part" || "$old_part" == "$NCURSES_LIBRARY_DIR" ]] && continue
+      new_rpath="$new_rpath:$old_part"
+    done
 
     echo "Patching legacy ncurses RPATH for generated Soong host tool: $host_tool -> $resolved_tool"
     "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$resolved_tool"
-    tool_deps="$(ldd "$resolved_tool" 2>&1 || true)"
+    tool_deps="$(env -u LD_LIBRARY_PATH ldd "$resolved_tool" 2>&1 || true)"
+    if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tool_deps"; then
+      echo "::error::ncurses5/tinfo5 remain unresolved without LD_LIBRARY_PATH for $host_tool ($resolved_tool)"
+      echo "$tool_deps"
+      return 1
+    fi
     if grep -q 'not found' <<<"$tool_deps"; then
-      echo "::error::Unresolved dependencies remain for $host_tool ($resolved_tool)"
+      echo "::error::Other unresolved dependencies remain for $host_tool ($resolved_tool)"
       echo "$tool_deps"
       return 1
     fi
@@ -259,7 +273,8 @@ patch_soong_host_tools() {
     resolved_tblgen="$(readlink -f "$SOONG_HOST_BIN/llvm-tblgen" 2>/dev/null || true)"
     if [[ -n "$resolved_tblgen" && -f "$resolved_tblgen" ]]; then
       local tblgen_deps
-      tblgen_deps="$(ldd "$resolved_tblgen" 2>&1 || true)"
+      # Match Ninja's sanitized environment; check RPATH without LD_LIBRARY_PATH.
+      tblgen_deps="$(env -u LD_LIBRARY_PATH ldd "$resolved_tblgen" 2>&1 || true)"
       if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tblgen_deps"; then
         echo "::error::llvm-tblgen still cannot resolve ncurses5/tinfo5; refusing to repeat the same failed build."
         echo "$tblgen_deps"
