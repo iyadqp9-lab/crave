@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Build the LineageOS 18.1 / Android 11 ROM for Samsung Galaxy Tab A SM-T355Y.
+# Build LineageOS 18.1 (Android 11) for Samsung Galaxy Tab A SM-T355Y (gt58lte) on Crave.
+#
+# Main change versus the previous script: the old "watcher" loop (ldd on every
+# file every 0.15s) was a race. Soong links llvm-tblgen and immediately runs it,
+# so the tool was often used before the watcher patched it. This version:
+#   1. builds the TableGen host tools first and patches them,
+#   2. runs the real build,
+#   3. if the libncurses.so.5 / libtinfo.so.5 error still appears, patches every
+#      host tool that needs those libraries and retries (incremental, max 6).
 set -Eeo pipefail
 
 decode_b64() {
@@ -17,6 +25,9 @@ BUILD_USERNAME="$(decode_b64 "${ACTOR_B64:-github-actions}")"
 BUILD_HOSTNAME="crave"
 export BUILD_USERNAME BUILD_HOSTNAME
 
+MAX_ATTEMPTS=6
+BUILD_LOG="/tmp/iyad-aziez-build.log"
+
 echo "=== IYAD AZIEZ OS build preflight ==="
 echo "Workspace: $(pwd)"
 echo "Device: $DEVICE_NAME"
@@ -26,7 +37,9 @@ if [[ ! -d .repo ]]; then
   exit 10
 fi
 
-# Clean the old local manifest and only the extra paths the user requested.
+# ---------------------------------------------------------------------------
+# 1. Manifest + sync
+# ---------------------------------------------------------------------------
 rm -rf .repo/local_manifests
 if [[ -n "$REMOVALS" ]]; then
   while IFS= read -r remove_path; do
@@ -62,6 +75,9 @@ else
   repo sync --force-sync --no-clone-bundle --no-tags -c -j2
 fi
 
+# ---------------------------------------------------------------------------
+# 2. Device tree validation and small fixes
+# ---------------------------------------------------------------------------
 echo "Validating the target device tree..."
 if [[ ! -f "device/samsung/$DEVICE_NAME/device.mk" ]]; then
   echo "::error::Device tree is missing: device/samsung/$DEVICE_NAME/device.mk"
@@ -87,21 +103,20 @@ sed -i \
   -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_ds_api.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_ds_api.so#g' \
   "device/samsung/$DEVICE_NAME/device.mk"
 
-# The upstream SM-T355Y device tree requests a regional kernel config fragment,
-# but the selected Galaxy-MSM8916 lineage-17.1 kernel branch does not ship it.
-# Keep the generic msm8916_sec_defconfig as the base and create an EMPTY fragment
-# only when the exact AUS fragment is missing; do not copy another model/region's config.
+# The SM-T355Y device tree asks for a regional kernel config fragment that the
+# selected kernel branch does not ship. Create an EMPTY fragment only if missing
+# (the generic msm8916_sec_defconfig stays the base); never copy another model's.
 if [[ "$DEVICE_NAME" == "gt58lte" && -d kernel/samsung/msm8916/arch/arm/configs ]]; then
   AUS_VARIANT_CONFIG="kernel/samsung/msm8916/arch/arm/configs/msm8916_sec_gt58lte_aus_defconfig"
   if [[ ! -f "$AUS_VARIANT_CONFIG" ]]; then
-    echo "::warning::Kernel branch lacks msm8916_sec_gt58lte_aus_defconfig; creating an empty regional fragment and retaining the generic msm8916_sec_defconfig."
+    echo "::warning::Kernel branch lacks msm8916_sec_gt58lte_aus_defconfig; creating an empty regional fragment."
     : > "$AUS_VARIANT_CONFIG"
   fi
 fi
 
-# Android 11's bundled Clang 3.8 requires the legacy ncurses5/tinfo5 ABI.
-# Always extract and prepend these libraries: ldconfig can report host libraries
-# that are not visible to the isolated build process used by Crave.
+# ---------------------------------------------------------------------------
+# 3. Legacy ncurses5/tinfo5 libraries (needed by Android 11's old Clang/LLVM)
+# ---------------------------------------------------------------------------
 if [[ "$(uname -m)" != "x86_64" ]]; then
   echo "::error::The ncurses compatibility packages are amd64-only; got $(uname -m)."
   exit 16
@@ -110,15 +125,33 @@ if ! command -v dpkg-deb >/dev/null 2>&1; then
   echo "::error::dpkg-deb is unavailable; cannot unpack the legacy compatibility libraries."
   exit 17
 fi
+
+fetch_file() {
+  # fetch_file <dest-dir> <file-name> <base-url>...  (tries each base URL in order)
+  local dest="$1" file="$2"
+  shift 2
+  [[ -s "$dest/$file" ]] && return 0
+  local base
+  for base in "$@"; do
+    if curl --fail --location --retry 3 --connect-timeout 20 \
+         "$base/$file" --output "$dest/$file"; then
+      return 0
+    fi
+    rm -f "$dest/$file"
+  done
+  return 1
+}
+
 NCURSES_ROOT="$HOME/.cache/iyad-aziez/ncurses5"
 NCURSES_PACKAGES="$NCURSES_ROOT/packages"
 NCURSES_EXTRACT="$NCURSES_ROOT/root"
 mkdir -p "$NCURSES_PACKAGES" "$NCURSES_EXTRACT"
-PACKAGE_BASE="https://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses"
+UBUNTU_BASE="https://archive.ubuntu.com/ubuntu/pool"
 for package in libtinfo5_6.2-0ubuntu2.1_amd64.deb libncurses5_6.2-0ubuntu2.1_amd64.deb; do
-  if [[ ! -s "$NCURSES_PACKAGES/$package" ]]; then
-    curl --fail --location --retry 3 --connect-timeout 20 \
-      "$PACKAGE_BASE/$package" --output "$NCURSES_PACKAGES/$package"
+  if ! fetch_file "$NCURSES_PACKAGES" "$package" \
+       "$UBUNTU_BASE/main/n/ncurses" "$UBUNTU_BASE/universe/n/ncurses"; then
+    echo "::error::Could not download $package from archive.ubuntu.com."
+    exit 18
   fi
   dpkg-deb -f "$NCURSES_PACKAGES/$package" Architecture | grep -qx 'amd64'
   dpkg-deb -x "$NCURSES_PACKAGES/$package" "$NCURSES_EXTRACT"
@@ -135,192 +168,137 @@ if [[ ! -e "$NCURSES_LIBRARY_DIR/libtinfo.so.5" ]]; then
 fi
 export LD_LIBRARY_PATH="$NCURSES_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 echo "Using legacy compiler libraries from: $NCURSES_LIBRARY_DIR"
-ls -l "$NCURSES_LIBRARY_DIR"/libncurses.so.5 "$NCURSES_LIBRARY_DIR"/libtinfo.so.5
 
-# Some Android build/Ninja subprocesses sanitize LD_LIBRARY_PATH. Embed an ELF
-# RPATH in the legacy tools so the dynamic loader can still find ncurses5.
+# Android build tools sanitize LD_LIBRARY_PATH for child processes, so the path
+# is also embedded as an ELF RPATH using patchelf.
 PATCHELF_BIN="$(command -v patchelf || true)"
 if [[ -z "$PATCHELF_BIN" ]]; then
   PATCHELF_ROOT="$HOME/.cache/iyad-aziez/patchelf"
-  PATCHELF_DEB="$PATCHELF_ROOT/patchelf_0.14.3-1+b1_amd64.deb"
+  PATCHELF_DEB="patchelf_0.14.3-1+b1_amd64.deb"
   PATCHELF_EXTRACT="$PATCHELF_ROOT/root"
   mkdir -p "$PATCHELF_ROOT" "$PATCHELF_EXTRACT"
-  if [[ ! -s "$PATCHELF_DEB" ]]; then
-    curl --fail --location --retry 3 --connect-timeout 20 \
-      "https://deb.debian.org/debian/pool/main/p/patchelf/patchelf_0.14.3-1+b1_amd64.deb" \
-      --output "$PATCHELF_DEB"
+  fetch_file "$PATCHELF_ROOT" "$PATCHELF_DEB" \
+    "https://deb.debian.org/debian/pool/main/p/patchelf" || true
+  if [[ -s "$PATCHELF_ROOT/$PATCHELF_DEB" ]]; then
+    dpkg-deb -f "$PATCHELF_ROOT/$PATCHELF_DEB" Architecture | grep -qx 'amd64'
+    dpkg-deb -x "$PATCHELF_ROOT/$PATCHELF_DEB" "$PATCHELF_EXTRACT"
+    PATCHELF_BIN="$(find "$PATCHELF_EXTRACT" -type f -name patchelf -print -quit)"
   fi
-  dpkg-deb -f "$PATCHELF_DEB" Architecture | grep -qx 'amd64'
-  dpkg-deb -x "$PATCHELF_DEB" "$PATCHELF_EXTRACT"
-  PATCHELF_BIN="$(find "$PATCHELF_EXTRACT" -type f -name patchelf -print -quit)"
 fi
 if [[ -z "$PATCHELF_BIN" || ! -x "$PATCHELF_BIN" ]]; then
   echo "::error::Could not obtain patchelf to fix legacy compiler runtime paths."
   exit 24
 fi
 
-CLANG_BIN="prebuilts/clang/host/linux-x86/clang-3289846/bin"
+needs_legacy_ncurses() {
+  local needed
+  needed="$("$PATCHELF_BIN" --print-needed "$1" 2>/dev/null || true)"
+  grep -Eq '^lib(ncurses|tinfo)\.so\.5$' <<<"$needed"
+}
+
+patch_tool() {
+  # Add the legacy library dir to the RPATH of one ELF file, only if it needs it.
+  local tool="$1" real old_rpath
+  real="$(readlink -f "$tool" 2>/dev/null || true)"
+  [[ -n "$real" && -f "$real" ]] || return 0
+  needs_legacy_ncurses "$real" || return 0
+  old_rpath="$("$PATCHELF_BIN" --print-rpath "$real" 2>/dev/null || true)"
+  case ":$old_rpath:" in
+    *":$NCURSES_LIBRARY_DIR:"*) return 0 ;;
+  esac
+  "$PATCHELF_BIN" --force-rpath --set-rpath "$NCURSES_LIBRARY_DIR${old_rpath:+:$old_rpath}" "$real"
+  echo "Patched RPATH: $real"
+}
+
+patch_all_host_tools() {
+  local dir tool
+  for dir in out/soong/host/linux-x86/bin out/host/linux-x86/bin; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' tool; do
+      patch_tool "$tool"
+    done < <(find "$dir" -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
+  done
+}
+
+# Locate the Clang tools actually present in the synced source tree.
+# Do not hard-code a prebuilt version number: Lineage branches use different names.
+CLANG_BIN=""
+while IFS= read -r -d '' candidate; do
+  if [[ -x "$candidate/clang.real" && -x "$candidate/llvm-as" ]]; then
+    CLANG_BIN="$candidate"
+    break
+  fi
+done < <(find prebuilts/clang/host/linux-x86 -mindepth 2 -maxdepth 3 -type d -name bin -print0 2>/dev/null)
+if [[ -z "$CLANG_BIN" ]]; then
+  echo "::error::Could not find a Clang prebuilt bin directory containing both clang.real and llvm-as."
+  find prebuilts/clang/host/linux-x86 -maxdepth 5 \( -name clang.real -o -name llvm-as \) -print 2>/dev/null || true
+  exit 20
+fi
+echo "Using Clang tools from: $CLANG_BIN"
 for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
-  if [[ ! -x "$legacy_tool" ]]; then
-    echo "::error::Expected Android 11 tool is missing: $legacy_tool"
-    exit 20
-  fi
-  old_rpath="$("$PATCHELF_BIN" --print-rpath "$legacy_tool" 2>/dev/null || true)"
-  new_rpath="$NCURSES_LIBRARY_DIR"
-  if [[ -n "$old_rpath" ]]; then
-    new_rpath="$new_rpath:$old_rpath"
-  fi
-  "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$legacy_tool"
-  echo "Patched RPATH for $legacy_tool: $("$PATCHELF_BIN" --print-rpath "$legacy_tool")"
-  if ldd "$legacy_tool" 2>&1 | grep -q 'not found'; then
+  patch_tool "$legacy_tool"
+  # Test without LD_LIBRARY_PATH so this validates the embedded RPATH itself.
+  if env -u LD_LIBRARY_PATH ldd "$legacy_tool" 2>&1 | grep -q 'not found'; then
     echo "::error::Unresolved shared library dependency for $legacy_tool after RPATH patch."
-    ldd "$legacy_tool" || true
+    env -u LD_LIBRARY_PATH ldd "$legacy_tool" || true
     exit 21
   fi
   "$legacy_tool" --version >/dev/null
 done
 echo "Legacy compiler dependencies are available."
 
+# ---------------------------------------------------------------------------
+# 4. Build
+# ---------------------------------------------------------------------------
 source build/envsetup.sh
 eval "$LUNCH"
 make installclean
 
-# Restore the shell environment too, but rely on the embedded RPATH above
-# because Android build tools may sanitize LD_LIBRARY_PATH for child processes.
-export LD_LIBRARY_PATH="$NCURSES_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-echo "Final compiler library path: $LD_LIBRARY_PATH"
-for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
-  echo "Checking legacy compiler RPATH after envsetup: $legacy_tool"
-  "$PATCHELF_BIN" --print-rpath "$legacy_tool"
-  ldd "$legacy_tool" | grep -E 'lib(ncurses|tinfo)\.so\.5'
-  if ldd "$legacy_tool" 2>&1 | grep -q 'not found'; then
-    echo "::error::Unresolved shared library dependency after envsetup for $legacy_tool"
-    ldd "$legacy_tool" || true
-    exit 23
-  fi
-  "$legacy_tool" --version >/dev/null
-done
-echo "Legacy compiler RPATH dependencies verified immediately before compilation."
+: > "$BUILD_LOG"
 
-# Soong generates host tools such as llvm-tblgen during the build, after the
-# initial preflight. A one-time scan misses those newly-created executables.
-# Keep a lightweight watcher running while Ninja builds, and embed the legacy
-# library path as soon as a generated executable needs ncurses5/tinfo5.
-SOONG_HOST_BIN="out/soong/host/linux-x86/bin"
-
-patch_one_soong_tool() {
-  local host_tool="$1"
-  [[ -e "$host_tool" || -L "$host_tool" ]] || return 0
-
-  local resolved_tool
-  resolved_tool="$(readlink -f "$host_tool" 2>/dev/null || true)"
-  [[ -n "$resolved_tool" && -f "$resolved_tool" && -x "$resolved_tool" ]] || return 0
-
-  # IMPORTANT: do not inherit LD_LIBRARY_PATH during this test. The Android
-  # build system sanitizes it for some Ninja subprocesses, so ordinary "ldd"
-  # can falsely say the dependency is available even though llvm-tblgen fails.
-  local tool_deps
-  tool_deps="$(env -u LD_LIBRARY_PATH ldd "$resolved_tool" 2>&1 || true)"
-  if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tool_deps"; then
-    local old_rpath
-    old_rpath="$("$PATCHELF_BIN" --print-rpath "$resolved_tool" 2>/dev/null || true)"
-
-    # Prepend the compatibility-library directory and preserve all other
-    # existing RPATH entries, avoiding duplicate entries on every watcher pass.
-    local new_rpath="$NCURSES_LIBRARY_DIR"
-    local old_part
-    local -a rpath_parts=()
-    IFS=':' read -r -a rpath_parts <<< "$old_rpath"
-    for old_part in "${rpath_parts[@]}"; do
-      [[ -z "$old_part" || "$old_part" == "$NCURSES_LIBRARY_DIR" ]] && continue
-      new_rpath="$new_rpath:$old_part"
-    done
-
-    echo "Patching legacy ncurses RPATH for generated Soong host tool: $host_tool -> $resolved_tool"
-    "$PATCHELF_BIN" --force-rpath --set-rpath "$new_rpath" "$resolved_tool"
-    tool_deps="$(env -u LD_LIBRARY_PATH ldd "$resolved_tool" 2>&1 || true)"
-    if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tool_deps"; then
-      echo "::error::ncurses5/tinfo5 remain unresolved without LD_LIBRARY_PATH for $host_tool ($resolved_tool)"
-      echo "$tool_deps"
-      return 1
-    fi
-    if grep -q 'not found' <<<"$tool_deps"; then
-      echo "::error::Other unresolved dependencies remain for $host_tool ($resolved_tool)"
-      echo "$tool_deps"
-      return 1
-    fi
-  fi
-}
-
-patch_soong_host_tools() {
-  [[ -d "$SOONG_HOST_BIN" ]] || return 0
-
-  # Do not filter with find's -executable predicate: the generated entries can
-  # be symlinks, and that predicate can skip the exact llvm-tblgen link we need.
-  while IFS= read -r -d '' host_tool; do
-    patch_one_soong_tool "$host_tool" || return 1
-  done < <(find "$SOONG_HOST_BIN" -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
-
-  # Explicitly inspect the known TableGen launchers even if find behaves
-  # differently for symlinks on the host filesystem.
-  patch_one_soong_tool "$SOONG_HOST_BIN/llvm-tblgen" || return 1
-  patch_one_soong_tool "$SOONG_HOST_BIN/clang-tblgen" || return 1
-
-  # Never perform the incremental retry unless the launcher named in the
-  # observed build error can now resolve the legacy ncurses/tinfo libraries.
-  if [[ -x "$SOONG_HOST_BIN/llvm-tblgen" ]]; then
-    local resolved_tblgen
-    resolved_tblgen="$(readlink -f "$SOONG_HOST_BIN/llvm-tblgen" 2>/dev/null || true)"
-    if [[ -n "$resolved_tblgen" && -f "$resolved_tblgen" ]]; then
-      local tblgen_deps
-      # Match Ninja's sanitized environment; check RPATH without LD_LIBRARY_PATH.
-      tblgen_deps="$(env -u LD_LIBRARY_PATH ldd "$resolved_tblgen" 2>&1 || true)"
-      if grep -Eq 'lib(ncurses|tinfo)\.so\.5 => not found' <<<"$tblgen_deps"; then
-        echo "::error::llvm-tblgen still cannot resolve ncurses5/tinfo5; refusing to repeat the same failed build."
-        echo "$tblgen_deps"
-        return 1
-      fi
-    fi
-  fi
-}
-(
-  while :; do
-    patch_soong_host_tools || exit 1
-    sleep 0.15
-  done
-) &
-SOONG_PATCH_WATCHER_PID=$!
-cleanup_soong_watcher() {
-  kill "$SOONG_PATCH_WATCHER_PID" 2>/dev/null || true
-  wait "$SOONG_PATCH_WATCHER_PID" 2>/dev/null || true
-}
-trap cleanup_soong_watcher EXIT
-
-echo "Starting ROM compilation..."
-BUILD_LOG="/tmp/iyad-aziez-build.log"
-set +e
-eval "$BUILD_COMMAND" 2>&1 | tee "$BUILD_LOG"
-BUILD_STATUS=${PIPESTATUS[0]}
-set -e
-
-# A newly generated Soong llvm-tblgen can be invoked before the background
-# watcher sees its symlink. If that exact old-library error occurs, patch all
-# generated tool targets and retry once; the existing outputs make this an
-# incremental retry rather than a clean rebuild.
-if [[ "$BUILD_STATUS" -ne 0 ]] && grep -Eq 'lib(ncurses|tinfo)\.so\.5: cannot open shared object file|error while loading shared libraries: lib(ncurses|tinfo)\.so\.5' "$BUILD_LOG"; then
-  echo "Legacy ncurses error detected. Patching generated Soong tools before one incremental retry."
-  if ! patch_soong_host_tools; then
-    echo "::error::Could not repair generated Soong tool dependencies; refusing an unpatched retry."
-    exit 25
-  fi
+run_build() {
+  local status
   set +e
-  eval "$BUILD_COMMAND" 2>&1 | tee -a "$BUILD_LOG"
-  BUILD_STATUS=${PIPESTATUS[0]}
+  eval "$1" 2>&1 | tee -a "$BUILD_LOG"
+  status=${PIPESTATUS[0]}
   set -e
+  return "$status"
+}
+
+# Phase 1: build the TableGen host tools alone and patch them before anything
+# executes them. Best-effort: if it fails, the retry loop below handles it.
+echo "Phase 1: building TableGen host tools first..."
+if ! run_build "m llvm-tblgen clang-tblgen"; then
+  echo "::warning::Phase 1 did not finish cleanly; continuing with the retry loop."
 fi
+patch_all_host_tools
+
+# Phase 2: the real build, with an incremental retry if the ncurses5 error appears.
+BUILD_STATUS=0
+attempt=1
+while true; do
+  echo "=== Build attempt $attempt/$MAX_ATTEMPTS ==="
+  log_start="$(wc -c < "$BUILD_LOG")"
+  if run_build "$BUILD_COMMAND"; then
+    BUILD_STATUS=0
+    break
+  else
+    BUILD_STATUS=$?
+  fi
+
+  if tail -c +"$((log_start + 1))" "$BUILD_LOG" \
+       | grep -Eq 'error while loading shared libraries: lib(ncurses|tinfo)\.so\.5' \
+     && (( attempt < MAX_ATTEMPTS )); then
+    echo "Legacy ncurses error detected. Patching generated host tools and retrying..."
+    patch_all_host_tools
+    attempt=$((attempt + 1))
+    continue
+  fi
+  break
+done
 
 if [[ "$BUILD_STATUS" -ne 0 ]]; then
-  echo "::error::ROM build failed with exit code $BUILD_STATUS."
+  echo "::error::ROM build failed with exit code $BUILD_STATUS (attempt $attempt)."
   exit "$BUILD_STATUS"
 fi
 
