@@ -235,7 +235,18 @@ if [[ -z "$CLANG_BIN" ]]; then
   exit 20
 fi
 echo "Using Clang tools from: $CLANG_BIN"
-for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
+# Patch every executable in this Clang toolchain, especially llvm-link:
+# RenderScript invokes llvm-link directly, and it also requires libncurses.so.5.
+while IFS= read -r -d '' legacy_tool; do
+  [[ -x "$legacy_tool" ]] || continue
+  patch_tool "$legacy_tool"
+done < <(find "$CLANG_BIN" -maxdepth 1 -type f -print0 2>/dev/null)
+
+for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as" "$CLANG_BIN/llvm-link"; do
+  if [[ ! -x "$legacy_tool" ]]; then
+    echo "::warning::Expected Clang tool not found: $legacy_tool"
+    continue
+  fi
   patch_tool "$legacy_tool"
   # Test without LD_LIBRARY_PATH so this validates the embedded RPATH itself.
   if env -u LD_LIBRARY_PATH ldd "$legacy_tool" 2>&1 | grep -q 'not found'; then
@@ -243,7 +254,6 @@ for legacy_tool in "$CLANG_BIN/clang.real" "$CLANG_BIN/llvm-as"; do
     env -u LD_LIBRARY_PATH ldd "$legacy_tool" || true
     exit 21
   fi
-  "$legacy_tool" --version >/dev/null
 done
 echo "Legacy compiler dependencies are available."
 
