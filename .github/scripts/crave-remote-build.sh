@@ -130,7 +130,7 @@ if [[ "$DEVICE_NAME" == "gt58lte" ]]; then
 PRODUCT_BRAND := Iyad Aziez
 PRODUCT_MANUFACTURER := Iyad Aziez
 PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/bootanimation.zip:system/media/bootanimation.zip
+    device/samsung/gt58lte/bootanimation.zip:system/media/bootanimation.zip
 EOF
 
   # Create a tiny, valid boot animation with a black background and a
