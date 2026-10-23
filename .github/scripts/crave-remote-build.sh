@@ -103,14 +103,15 @@ sed -i \
   -e 's#vendor/samsung/msm8916-common/proprietary/lib/libloc_ds_api.so#vendor/samsung/msm8916-common/proprietary/vendor/lib/libloc_ds_api.so#g' \
   "device/samsung/$DEVICE_NAME/device.mk"
 
-# The SM-T355Y device tree asks for a regional kernel config fragment that the
-# selected kernel branch does not ship. Create an EMPTY fragment only if missing
-# (the generic msm8916_sec_defconfig stays the base); never copy another model's.
-if [[ "$DEVICE_NAME" == "gt58lte" && -d kernel/samsung/msm8916/arch/arm/configs ]]; then
+# Do not fabricate an empty regional kernel defconfig: it can silently omit
+# device-specific kernel options and produce a build that boots incorrectly.
+# Require the exact SM-T355Y/Australia variant config referenced by this device tree.
+if [[ "$DEVICE_NAME" == "gt58lte" ]]; then
   AUS_VARIANT_CONFIG="kernel/samsung/msm8916/arch/arm/configs/msm8916_sec_gt58lte_aus_defconfig"
-  if [[ ! -f "$AUS_VARIANT_CONFIG" ]]; then
-    echo "::warning::Kernel branch lacks msm8916_sec_gt58lte_aus_defconfig; creating an empty regional fragment."
-    : > "$AUS_VARIANT_CONFIG"
+  if [[ ! -s "$AUS_VARIANT_CONFIG" ]]; then
+    echo "::error::Required SM-T355Y kernel config is missing or empty: $AUS_VARIANT_CONFIG"
+    echo "Use a kernel branch that explicitly provides the gt58lte AUS config; do not substitute another model's config."
+    exit 25
   fi
 fi
 
