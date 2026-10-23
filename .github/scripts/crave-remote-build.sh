@@ -116,6 +116,69 @@ if [[ "$DEVICE_NAME" == "gt58lte" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. IYAD AZIEZ branding and conservative battery configuration
+# ---------------------------------------------------------------------------
+# Keep branding limited to the target product; do not overwrite Samsung model
+# identifiers or copy files from a different tablet variant.
+if [[ "$DEVICE_NAME" == "gt58lte" ]]; then
+  DEVICE_DIR="device/samsung/$DEVICE_NAME"
+  BRANDING_MK="$DEVICE_DIR/iyad_aziez_branding.mk"
+
+  cat > "$BRANDING_MK" <<'EOF'
+# IYAD AZIEZ OS product branding for Samsung Galaxy Tab A SM-T355Y.
+# The custom boot animation is installed by the product makefile below.
+PRODUCT_BRAND := Iyad Aziez
+PRODUCT_MANUFACTURER := Iyad Aziez
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/bootanimation.zip:system/media/bootanimation.zip
+EOF
+
+  # Create a tiny, valid boot animation with a black background and a
+  # centered "iyad aziez" logo. Use ImageMagick if the build host has it.
+  # Keep frame count/resolution low to avoid increasing boot time or ZIP size.
+  BOOTANIM_WORK="/tmp/iyad-aziez-bootanimation"
+  mkdir -p "$BOOTANIM_WORK/part0"
+  if command -v convert >/dev/null 2>&1; then
+    convert -size 720x1280 xc:black -fill white -gravity center \
+      -font DejaVu-Sans -pointsize 54 -annotate +0+0 'iyad aziez' \
+      "$BOOTANIM_WORK/part0/00000.png"
+    cp "$BOOTANIM_WORK/part0/00000.png" "$BOOTANIM_WORK/part0/00001.png"
+    printf '720 1280 15\np 1 0 part0\n' > "$BOOTANIM_WORK/desc.txt"
+    (cd "$BOOTANIM_WORK" && zip -q -0 -r "$PWD/bootanimation.zip" desc.txt part0)
+    cp "$BOOTANIM_WORK/bootanimation.zip" "$DEVICE_DIR/bootanimation.zip"
+  else
+    echo "::warning::ImageMagick is unavailable; leaving the existing boot animation unchanged."
+    rm -f "$BRANDING_MK"
+  fi
+
+  # Only include the branding makefile when its animation was generated.
+  if [[ -s "$DEVICE_DIR/bootanimation.zip" && -s "$BRANDING_MK" ]]; then
+    if ! grep -qF 'inherit-product, device/samsung/gt58lte/iyad_aziez_branding.mk' "$DEVICE_DIR/device.mk"; then
+      printf '\n# IYAD AZIEZ OS branding\n$(call inherit-product, device/samsung/gt58lte/iyad_aziez_branding.mk)\n' >> "$DEVICE_DIR/device.mk"
+    fi
+    echo "Applied IYAD AZIEZ boot branding."
+  fi
+
+  # Do not fake root access with a property: LineageOS 18.1 must include a
+  # compatible su implementation for an actual root toggle. Report the
+  # supported path and leave the ROM build safe if no su package is configured.
+  if ! grep -RqsE '(^|[[:space:]])(WITH_SU[[:space:]]*:?=|PRODUCT_PACKAGES.*\bsu\b|addonsu)' "$DEVICE_DIR"; then
+    echo "::warning::No device-tree su implementation found. This build will not claim built-in root; add a compatible root solution after validating the ROM."
+  fi
+
+  # Battery-life improvements are device/kernel/HAL-specific. Avoid unsafe
+  # guessed CPU-frequency, voltage, thermal, or wakelock tweaks in a build
+  # script; verify that the target tree defines power profiles and a Power HAL.
+  if [[ ! -d "device/samsung/$DEVICE_NAME" ]]; then
+    echo "::error::Device tree disappeared before power configuration check."
+    exit 26
+  fi
+  if ! grep -RqsE 'power_profile|PowerProfile|android.hardware.power|power.*\.xml' "device/samsung/$DEVICE_NAME"; then
+    echo "::warning::No device-specific power profile was found by the basic check; battery optimization still needs device testing."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Legacy ncurses5/tinfo5 libraries (needed by Android 11's old Clang/LLVM)
 # ---------------------------------------------------------------------------
 if [[ "$(uname -m)" != "x86_64" ]]; then
